@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -174,6 +175,51 @@ def discover_tracking_runs(output_dir):
     return runs
 
 
+def dataset_cache_fingerprint(output_dir, tracking_dir):
+    """Fingerprint the files consulted by ``load_dashboard_dataset``.
+
+    Include candidate summaries *and* their CSVs, not only the artifacts
+    selected on the previous render: adding or removing a compatible output
+    must also invalidate the cached dataset. Read only file metadata, never
+    the potentially large video files or CSV contents.
+    """
+    output_dir = Path(output_dir).expanduser().resolve()
+    tracking_dir = Path(tracking_dir).expanduser().resolve()
+    paths = {
+        tracking_dir / "tracking_summary.json",
+        tracking_dir / "tracks_confirmed.csv",
+        tracking_dir / "tracks.csv",
+        output_dir / "camera_quality_hybrid.csv",
+        output_dir / "landmark_validation" / "validation_summary.csv",
+    }
+    patterns = (
+        "*/tracking_summary.json",
+        "*/team_classification_summary.json",
+        "*/team_assignments.csv",
+        "**/compensation_summary.json",
+        "**/compensated_tracks.csv",
+        "**/mapping_summary.json",
+        "**/mapped_player_positions.csv",
+        "*/detection_summary.json",
+        "*/detections.csv",
+        "pitch_mapping/**/pitch_calibration.json",
+    )
+    for pattern in patterns:
+        paths.update(output_dir.glob(pattern))
+
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: str(item).casefold()):
+        try:
+            stat = path.stat()
+            signature = (str(path), stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+        except FileNotFoundError:
+            signature = (str(path), "missing")
+        # Stable path+metadata signature, avoiding memory-heavy content hashing.
+        digest.update(repr(signature).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def _compatible_summary_paths(output_dir, pattern, run_id, video_path):
     matches = []
     for summary_path in Path(output_dir).glob(pattern):
@@ -187,6 +233,22 @@ def _compatible_summary_paths(output_dir, pattern, run_id, video_path):
         ):
             matches.append((summary_path, summary))
     return sorted(matches, key=lambda item: str(item[0]).lower())
+
+
+def _unique_compatible_output(matches, label, warnings, output_dir):
+    """Fail closed on ambiguous outputs; never treat folder names as chronology."""
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        # Paths are displayed for diagnosis only, not used to choose a winner.
+        paths = ", ".join(
+            display_path(path.parent, output_dir) for path, _ in matches
+        )
+        warnings.append(
+            f"Multiple compatible {label} outputs ({len(matches)}): {paths}. "
+            f"No {label} output selected; resolve the ambiguity explicitly."
+        )
+    return None, None
 
 
 def _same_video(recorded, selected):
@@ -308,7 +370,9 @@ def load_dashboard_dataset(output_dir, tracking_dir):
             (tracking_dir / "tracks_confirmed.csv"),
         )
     ]
-    team_summary_path, team_summary = team_matches[-1] if team_matches else (None, None)
+    team_summary_path, team_summary = _unique_compatible_output(
+        team_matches, "team-classification", warnings, output_dir
+    )
     assignments = None
     if team_summary_path:
         team_csv_path = team_summary_path.parent / "team_assignments.csv"
@@ -318,7 +382,7 @@ def load_dashboard_dataset(output_dir, tracking_dir):
             raise DataValidationError("Team assignments do not match selected tracking UUID.")
         if assignments.duplicated(["run_id", "track_id"]).any():
             raise DataValidationError("Team assignment run/track keys are not unique.")
-    else:
+    elif not team_matches:
         warnings.append("No team-classification output matches this tracking run and video.")
 
     compensated_matches = _compatible_summary_paths(
@@ -331,8 +395,8 @@ def load_dashboard_dataset(output_dir, tracking_dir):
             (tracking_dir / "tracks_confirmed.csv"),
         )
     ]
-    compensation_summary_path, compensation_summary = (
-        compensated_matches[-1] if compensated_matches else (None, None)
+    compensation_summary_path, compensation_summary = _unique_compatible_output(
+        compensated_matches, "camera-compensation", warnings, output_dir
     )
     compensated = None
     if compensation_summary_path:
@@ -340,16 +404,19 @@ def load_dashboard_dataset(output_dir, tracking_dir):
         compensated = read_csv(compensated_path, COMPENSATED_COLUMNS, required=True)
         if _unique_run_ids(compensated, "Compensated tracks") - {run_id}:
             raise DataValidationError("Compensated tracks do not match selected run UUID.")
-    else:
+    elif not compensated_matches:
         warnings.append("No camera-compensation output matches this tracking run and video.")
 
     all_mapping_matches = _compatible_summary_paths(
         output_dir, "**/mapping_summary.json", run_id, video_path
     )
-    mapping_matches = list(all_mapping_matches)
+    # A mapping is usable only with its independently verified compensation run.
+    # If compensation is missing or ambiguous, selecting mapping independently
+    # would imply that the coordinates have been registered when they have not.
+    mapping_matches = []
     if compensation_summary:
         mapping_matches = [
-            item for item in mapping_matches
+            item for item in all_mapping_matches
             if item[1].get("compensation_run_id")
             == compensation_summary.get("compensation_run_id")
             and _same_video(
@@ -357,7 +424,9 @@ def load_dashboard_dataset(output_dir, tracking_dir):
                 compensation_summary_path.parent / "compensated_tracks.csv",
             )
         ]
-    mapping_summary_path, mapping_summary = mapping_matches[-1] if mapping_matches else (None, None)
+    mapping_summary_path, mapping_summary = _unique_compatible_output(
+        mapping_matches, "pitch-mapping", warnings, output_dir
+    )
     mapping = None
     if mapping_summary_path:
         mapping_path = mapping_summary_path.parent / "mapped_player_positions.csv"
@@ -368,11 +437,17 @@ def load_dashboard_dataset(output_dir, tracking_dir):
             errors.append("Mapping and selected compensation summaries have different run IDs.")
             mapping = None
     else:
-        if compensation_summary and all_mapping_matches:
+        if not compensation_summary and all_mapping_matches:
+            warnings.append(
+                "Pitch-mapping outputs exist, but no unique compatible camera-compensation "
+                "output is selected; mapping was withheld."
+            )
+        elif compensation_summary and all_mapping_matches and not mapping_matches:
             errors.append(
                 "Mapping and selected compensation summaries have different run IDs or input files."
             )
-        warnings.append("No pitch-mapping output matches this tracking run and video.")
+        if not all_mapping_matches:
+            warnings.append("No pitch-mapping output matches this tracking run and video.")
 
     detection_matches = []
     same_video_detections = []
@@ -383,9 +458,8 @@ def load_dashboard_dataset(output_dir, tracking_dir):
             same_video_detections.append((path, summary))
             if tracking_span is not None and _frame_span(summary) == tracking_span:
                 detection_matches.append((path, summary))
-    detection_summary_path, detection_summary = (
-        sorted(detection_matches, key=lambda item: str(item[0]).lower())[-1]
-        if detection_matches else (None, None)
+    detection_summary_path, detection_summary = _unique_compatible_output(
+        detection_matches, "detection", warnings, output_dir
     )
     detections = None
     if detection_summary_path:
@@ -393,7 +467,7 @@ def load_dashboard_dataset(output_dir, tracking_dir):
             detection_summary_path.parent / "detections.csv",
             {"frame_number", "object_class", "confidence", "x1", "y1", "x2", "y2"},
         )
-    else:
+    elif not detection_matches:
         if same_video_detections:
             warnings.append(
                 "Detection outputs exist for this video, but none match the selected tracking frame range."
@@ -707,8 +781,19 @@ def available_videos(output_dir):
     return sorted(root.rglob("*.mp4"), key=lambda path: str(path).lower())
 
 
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    try:
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def compatible_video_options(output_dir, dataset):
-    """Return selected-run video variants, preferring H.264 and retaining originals."""
+    """Return trusted selected-run H.264 variants and compatible original fallbacks."""
     output_dir = Path(output_dir)
     source_video = Path(dataset["video_path"]).expanduser()
     tracking_summary = dataset.get("tracking_summary") or {}
@@ -716,7 +801,6 @@ def compatible_video_options(output_dir, dataset):
     tracking_span = _frame_span(tracking_summary)
     tracking_csv = Path(dataset.get("tracking_dir", "")) / "tracks_confirmed.csv"
     summaries = dataset.get("source_summaries") or {}
-    browser_dir = output_dir / "browser_videos"
 
     def summary_path(key):
         value = summaries.get(key)
@@ -740,8 +824,10 @@ def compatible_video_options(output_dir, dataset):
     ):
         specifications.append((
             "YOLO detection",
+            "detection",
             detection_path.parent / "annotated_detection.mp4",
             "annotated_detection_h264.mp4",
+            tracking_span,
         ))
 
     tracking_path = summary_path("tracking")
@@ -752,8 +838,10 @@ def compatible_video_options(output_dir, dataset):
     ):
         specifications.append((
             "ByteTrack tracking",
+            "tracking",
             tracking_path.parent / "annotated_tracking.mp4",
             "annotated_tracking_h264.mp4",
+            tracking_span,
         ))
 
     team_path = summary_path("teams")
@@ -765,8 +853,10 @@ def compatible_video_options(output_dir, dataset):
     ):
         specifications.append((
             "Team classification",
+            "team_classification",
             team_path.parent / "annotated_teams.mp4",
             "annotated_teams_h264.mp4",
+            tracking_span,
         ))
 
     compensation_path = summary_path("compensation")
@@ -778,8 +868,10 @@ def compatible_video_options(output_dir, dataset):
     ):
         specifications.append((
             "Camera-compensation comparison",
+            "camera_compensation",
             compensation_path.parent / "trajectory_comparison.mp4",
             "trajectory_comparison_h264.mp4",
+            tracking_span,
         ))
 
     mapping_path = summary_path("mapping")
@@ -800,16 +892,72 @@ def compatible_video_options(output_dir, dataset):
     ):
         specifications.append((
             "Pitch mapping",
+            "pitch_mapping",
             mapping_path.parent / "annotated_pitch_mapping.mp4",
             "annotated_pitch_mapping_h264.mp4",
+            tracking_span,
         ))
 
+    def trusted_h264(original, filename, analysis_type, frame_range):
+        if (
+            not frame_range
+            or not run_id
+            or Path(run_id).name != run_id
+            or run_id in {".", ".."}
+            or not original.is_file()
+            or not source_video.is_file()
+        ):
+            return None
+        h264 = output_dir / "browser_videos" / run_id / filename
+        provenance_path = h264.with_suffix(h264.suffix + ".json")
+        if not h264.is_file() or not provenance_path.is_file():
+            return None
+
+        try:
+            with provenance_path.open("r", encoding="utf-8") as stream:
+                provenance = json.load(stream)
+            output_size = h264.stat().st_size
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(provenance, dict):
+            return None
+
+        expected_output_path = (Path("browser_videos") / run_id / filename).as_posix()
+        original_hash = _sha256_file(original)
+        source_hash = _sha256_file(source_video)
+        output_hash = _sha256_file(h264)
+        if not original_hash or not source_hash or not output_hash:
+            return None
+
+        try:
+            recorded_range = (
+                int(provenance["start_frame"]),
+                int(provenance["end_frame_exclusive"]),
+            )
+            recorded_size = int(provenance["conversion_output_size_bytes"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+
+        if (
+            provenance.get("tracking_run_id") != run_id
+            or provenance.get("analysis_type") != analysis_type
+            or not _same_video(provenance.get("original_video_path"), original)
+            or provenance.get("original_video_sha256") != original_hash
+            or provenance.get("source_footage_sha256") != source_hash
+            or recorded_range != frame_range
+            or provenance.get("conversion_output_path") != expected_output_path
+            or provenance.get("conversion_output_sha256") != output_hash
+            or recorded_size != output_size
+        ):
+            return None
+        return h264.resolve()
+
     options = []
-    for label, original, h264_name in specifications:
-        h264 = browser_dir / h264_name
-        if h264.is_file():
-            options.append({"path": h264.resolve(), "label": f"{label} · H.264"})
-    for label, original, _ in specifications:
+    for label, analysis_type, original, h264_name, frame_range in specifications:
+        h264 = trusted_h264(original, h264_name, analysis_type, frame_range)
+        if h264 is not None:
+            options.append({"path": h264, "label": f"{label} · H.264"})
+    for label, _, original, _, _ in specifications:
         if original.is_file():
             options.append({"path": original.resolve(), "label": f"{label} · original"})
     if source_video.is_file():

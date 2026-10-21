@@ -73,7 +73,9 @@ st.markdown(
 
 
 @st.cache_data(show_spinner="Loading local analysis outputs…")
-def load_dataset(output_root, selected_tracking_dir):
+def load_dataset(output_root, selected_tracking_dir, file_fingerprint):
+    # This argument is intentionally part of Streamlit's cache key.
+    # It changes when an input CSV/JSON is edited, added, or removed.
     return data.load_dashboard_dataset(Path(output_root), Path(selected_tracking_dir))
 
 
@@ -176,7 +178,8 @@ with st.sidebar:
     )
 
 try:
-    dataset = load_dataset(str(output_root), str(selected_run["directory"]))
+    file_fingerprint = data.dataset_cache_fingerprint(output_root, selected_run["directory"])
+    dataset = load_dataset(str(output_root), str(selected_run["directory"]), file_fingerprint)
 except (data.DataValidationError, FileNotFoundError, OSError) as exc:
     st.error(f"Unable to load selected dataset safely: {exc}")
     st.stop()
