@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 import dashboard_data as data
 import frame_explorer as explorer
 import pitch_explorer as pitch_view
+import dashboard_theme as ui
 
 
 st.set_page_config(
@@ -45,33 +46,7 @@ TEAM_LABELS = {
 }
 
 
-st.markdown(
-    """
-    <style>
-        .block-container {padding-top: 1.5rem; padding-bottom: 2.5rem; max-width: 1500px;}
-        h1 {letter-spacing: -0.035em; font-weight: 750;}
-        h2, h3 {letter-spacing: -0.02em;}
-        [data-testid="stSidebar"] {border-right: 1px solid #e3e8ee;}
-        [data-testid="stMetric"] {background: #f5f7fa; border: 1px solid #e3e8ee;
-          padding: 0.9rem 1rem; border-radius: 0.65rem; min-height: 112px;}
-        [data-testid="stMetricLabel"] {font-size: 0.9rem;}
-        .fmi-subtitle {color: #627080; font-size: 1.04rem; margin-bottom: 1.2rem;}
-        .fmi-warning {background: #fff4d6; border-left: 5px solid #e3ad1b;
-          padding: 0.8rem 1rem; border-radius: 0.35rem; margin: 0.5rem 0 1rem;}
-        .fmi-pipeline {height: 100%; min-height: 115px; background: #f7f8fa;
-          border: 1px solid #e1e6ec; border-top: 4px solid #8b1e3f;
-          border-radius: 0.55rem; padding: 0.8rem 0.9rem;}
-        .fmi-pipeline b {display: block; margin-bottom: 0.35rem; color: #252b33;}
-        .fmi-pipeline span {color: #596573; font-size: 0.9rem; line-height: 1.4;}
-        div[data-testid="stDataFrame"] {border: 1px solid #e3e8ee; border-radius: 0.45rem;}
-        @media (max-width: 900px) {
-          .block-container {padding-left: 1rem; padding-right: 1rem;}
-          [data-testid="stMetric"] {min-height: 96px;}
-        }
-        </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown(ui.CSS, unsafe_allow_html=True)
 
 
 @st.cache_data(show_spinner="Loading local analysis outputs…")
@@ -119,6 +94,27 @@ def bool_series(series):
     )
 
 
+def style_matplotlib_axes(fig, axes):
+    """Apply night-match styling without altering underlying observations."""
+    fig.set_facecolor("#132237")
+    if not isinstance(axes, (list, tuple, np.ndarray)):
+        axes = [axes]
+    for ax in axes:
+        ax.set_facecolor("#122536")
+        ax.tick_params(colors="#afc2d5")
+        ax.xaxis.label.set_color("#c3d6e5")
+        ax.yaxis.label.set_color("#c3d6e5")
+        ax.title.set_color("#edf4fc")
+        for spine in ax.spines.values():
+            spine.set_color("#35516a")
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.get_frame().set_facecolor("#182b40")
+            legend.get_frame().set_edgecolor("#35516a")
+            for text in legend.get_texts():
+                text.set_color("#e6f1fc")
+
+
 def show_frame_scatter(frame, x, y, title, x_label, y_label, color_column=None):
     fig, ax = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
     if color_column and color_column in frame.columns:
@@ -134,6 +130,7 @@ def show_frame_scatter(frame, x, y, title, x_label, y_label, color_column=None):
     ax.set_ylabel(y_label)
     ax.grid(alpha=0.2)
     ax.invert_yaxis()
+    style_matplotlib_axes(fig, ax)
     st.pyplot(fig, clear_figure=True)
 
 
@@ -146,16 +143,15 @@ def show_not_validated():
     )
 
 
-st.title("⚽ Football Match Intelligence")
-st.markdown(
-    '<p class="fmi-subtitle">Computer-vision analysis with explicit run provenance '
-    "and experimental-data boundaries.</p>",
-    unsafe_allow_html=True,
-)
-
 paths = data.ProjectPaths.from_environment(ROOT)
 with st.sidebar:
-    st.header("Dataset")
+    st.markdown(
+        '<div class="fmi-brand"><span class="fmi-mark">⚽</span>'
+        '<div><div class="fmi-brand-name">MATCH INTELLIGENCE</div>'
+        '<div class="fmi-brand-sub">Vision analytics lab</div></div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="fmi-side-caption">DATA SOURCE</div>', unsafe_allow_html=True)
     output_text = st.text_input(
         "Output directory",
         data.display_path(paths.output_dir, ROOT),
@@ -174,8 +170,9 @@ with st.sidebar:
         index=0,
     )
     selected_run = next(item for item in runs if item["label"] == selected_label)
+    st.markdown('<div class="fmi-side-caption">WORKSPACE</div>', unsafe_allow_html=True)
     page = st.radio(
-        "Workspace",
+        "Navigate",
         [
             "Overview",
             "Video analysis",
@@ -187,6 +184,13 @@ with st.sidebar:
             "Pitch mapping",
             "Technical diagnostics",
         ],
+        format_func=lambda item: ui.NAV_LABELS.get(item, item),
+        label_visibility="collapsed",
+    )
+    st.markdown(
+        '<div class="fmi-side-note"><span class="fmi-online"></span>Read-only local workspace'
+        '<div style="margin-top:6px">Run IDs are provisional. Pitch positions appear only where calibration supports them.</div></div>',
+        unsafe_allow_html=True,
     )
 
 try:
@@ -196,10 +200,6 @@ except (data.DataValidationError, FileNotFoundError, OSError) as exc:
     st.error(f"Unable to load selected dataset safely: {exc}")
     st.stop()
 
-for message in dataset["warnings"]:
-    st.warning(message)
-for message in dataset["errors"]:
-    st.error(message)
 
 tracking = dataset["tracking_summary"]
 confirmed = dataset["confirmed_tracks"]
@@ -211,9 +211,23 @@ run_id = dataset["run_id"]
 duration = data.duration_seconds(tracking)
 confirmed_stats = data.track_run_summary(confirmed)
 raw_stats = data.track_run_summary(raw)
+st.markdown(
+    ui.page_hero(
+        page,
+        run_id=run_id,
+        frames=safe_int(tracking.get("frames_processed")),
+        duration=duration,
+        directory=Path(selected_run["directory"]).name,
+    ),
+    unsafe_allow_html=True,
+)
+for message in dataset["warnings"]:
+    st.warning(message)
+for message in dataset["errors"]:
+    st.error(message)
 
 if page == "Overview":
-    st.subheader("Run overview")
+    st.markdown('<div class="fmi-section-header">Run overview <small>observed, not inferred</small></div>', unsafe_allow_html=True)
     st.caption(
         f"Tracking run `{run_id}` · source `{data.display_path(dataset['video_path'], ROOT)}` · "
         f"track IDs are provisional tracker assignments, not verified player identities."
@@ -257,7 +271,8 @@ if page == "Overview":
             "do not interpret this as full-pitch or full-match activity.</div>",
             unsafe_allow_html=True,
         )
-    st.subheader("Processing pipeline")
+    st.markdown(ui.mapping_coverage_panel(len(mapped_valid), map_total), unsafe_allow_html=True)
+    st.markdown('<div class="fmi-section-header">Processing pipeline <small>5 processing stages</small></div>', unsafe_allow_html=True)
     pipeline = [
         ("01 · Detect", "YOLO person and ball detections"),
         ("02 · Track", "ByteTrack IDs; run-scoped, provisional"),
@@ -272,10 +287,11 @@ if page == "Overview":
             unsafe_allow_html=True,
         )
     st.caption(
-        "This is a 4-second demonstration. Team and role labels are provisional; "
-        "pitch dimensions are assumed and mapping coverage is sparse."
+        "This is a short-clip demonstration, not full-match analytics. "
+        "Team and role labels are provisional; pitch dimensions are assumed and "
+        "mapping coverage is limited to the calibrated region."
     )
-    st.subheader("Available analysis outputs")
+    st.markdown('<div class="fmi-section-header">Analysis provenance <small>selected-run artifacts</small></div>', unsafe_allow_html=True)
     source_rows = [
         {
             "Artifact": key.title(),
@@ -611,6 +627,7 @@ elif page == "Team classification":
             ax.hist(confidence, bins=np.linspace(0, 1, 11), color="#566b82", edgecolor="white")
             ax.set(title="Classification confidence distribution (track assignments)", xlabel="Confidence", ylabel="Track count")
             ax.set_xlim(0, 1)
+            style_matplotlib_axes(fig, ax)
             st.pyplot(fig, clear_figure=True)
         if not confirmed.empty:
             st.markdown("**Team-colored observations**")
@@ -651,6 +668,7 @@ elif page == "Movement and heatmaps":
         ax.set_xlabel(f"{label} · x")
         ax.set_ylabel(f"{label} · y")
         ax.set_title(f"Observed position counts (n={sample_count:,}); no probability normalization")
+        style_matplotlib_axes(fig, ax)
         st.pyplot(fig, clear_figure=True)
     else:
         plt.close(fig)
@@ -712,6 +730,7 @@ elif page == "Pitch mapping":
                    title=f"Valid mapped observations only · n={len(valid):,} · {unique_tracks} track IDs")
             ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2, fontsize=9)
             ax.set_aspect("equal", adjustable="box")
+            style_matplotlib_axes(fig, ax)
             st.pyplot(fig, clear_figure=True)
             if pitch_hull:
                 st.caption("Shaded region: supported calibration hull. Unshaded pitch areas are outside the calibrated coverage.")
@@ -776,6 +795,7 @@ elif page == "Technical diagnostics":
                    title=f"Camera transition status · {len(failed_rows):,} failed/invalid of {len(quality):,}")
             ax.grid(axis="x", alpha=0.2)
             ax.legend(loc="upper right", frameon=True)
+            style_matplotlib_axes(fig, ax)
             st.pyplot(fig, clear_figure=True)
         with st.expander("Advanced camera details"):
             st.write({
@@ -831,6 +851,7 @@ elif page == "Technical diagnostics":
         axes[1].grid(alpha=0.2)
         axes[1].legend(title="Run ID", loc="center left", bbox_to_anchor=(1.0, 0.5),
                        frameon=False, fontsize=7, title_fontsize=8)
+        style_matplotlib_axes(fig, axes)
         st.pyplot(fig, clear_figure=True)
         st.caption("Runs remain separate. Chart labels R01, R02, etc. map to full run IDs below; status distinguishes latest, reviewed, superseded, and unreviewed measurements.")
         validation_history = validation_history.copy()

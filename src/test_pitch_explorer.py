@@ -150,6 +150,30 @@ class PitchExplorerTests(unittest.TestCase):
         self.assertEqual(sum(len(trace.x) for trace in samples), len(rows))
         self.assertFalse(any(getattr(trace, "type", "") == "heatmap" for trace in fig.data))
 
+    def test_pitch_canvas_is_dark_and_field_shading_stays_within_boundaries(self):
+        fig = pitch.make_pitch_figure(self.filtered(), length=105, width=68,
+                                      segment_id="segment_000", mode="frame", frame_number=101)
+        self.assertNotEqual(fig.layout.plot_bgcolor, "#164e2e")
+        backgrounds = [shape for shape in fig.layout.shapes
+                       if getattr(shape, "fillcolor", None)]
+        self.assertGreaterEqual(len(backgrounds), 2)
+        for shape in backgrounds:
+            self.assertGreaterEqual(shape.x0, 0)
+            self.assertLessEqual(shape.x1, 105)
+            self.assertGreaterEqual(shape.y0, 0)
+            self.assertLessEqual(shape.y1, 68)
+
+    def test_trajectory_legend_is_role_based_not_repeated_for_each_fragment(self):
+        fig = pitch.make_pitch_figure(self.filtered(track_ids=["24"]), length=105,
+                                      width=68, segment_id="segment_000", mode="trajectories")
+        segments = [trace for trace in fig.data if str(trace.name).startswith("Track 24")]
+        self.assertEqual(len(segments), 2)
+        self.assertTrue(all(trace.showlegend is False for trace in segments))
+        legend_roles = [trace for trace in fig.data if trace.showlegend is True]
+        self.assertEqual(len(legend_roles), 1)
+        self.assertEqual(legend_roles[0].name, "team a outfield")
+        self.assertEqual(len(legend_roles[0].x), 0)
+
     def test_unrecognized_mode_rejected(self):
         with self.assertRaises(ValueError):
             pitch.make_pitch_figure(self.filtered(), length=105, width=68,

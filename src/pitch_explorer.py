@@ -129,6 +129,16 @@ def continuous_trajectories(rows):
 
 def _pitch_figure(length, width, title):
     fig = go.Figure()
+    # The surrounding canvas is dark; grass and stripes are clipped to the
+    # *assumed* pitch rectangle, never used as a calibration/coverage signal.
+    fig.add_shape(type="rect", x0=0, y0=0, x1=length, y1=width,
+                  line=dict(width=0), fillcolor="#115441", layer="below")
+    for index in range(10):
+        if index % 2 == 0:
+            fig.add_shape(type="rect", x0=length * index / 10, y0=0,
+                          x1=length * (index + 1) / 10, y1=width,
+                          line=dict(width=0), fillcolor="rgba(155,232,184,0.055)",
+                          layer="below")
     # Field markings are assumed reference geometry, NOT detected/calibrated evidence.
     markings = [
         dict(type="rect", x0=0, y0=0, x1=length, y1=width),
@@ -160,13 +170,19 @@ def _pitch_figure(length, width, title):
                                  marker=dict(size=5, color="#ffffff"),
                                  hoverinfo="skip", showlegend=False))
     fig.update_layout(
-        title=title, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#164e2e",
-        margin=dict(l=15, r=15, t=48, b=18), height=570,
-        legend=dict(orientation="h", y=-0.12, x=0),
+        title=dict(text=title, font=dict(size=16, color="#e6f7f2"), x=0.02),
+        paper_bgcolor="#101c2b", plot_bgcolor="#0b1724",
+        font=dict(family="Segoe UI, Arial, sans-serif", color="#b4c9d8", size=12),
+        margin=dict(l=28, r=25, t=55, b=65), height=475,
+        hoverlabel=dict(bgcolor="#17283a", font_color="#f3f7ff"),
+        legend=dict(orientation="h", y=-0.17, x=0,
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
         xaxis=dict(range=[-2, length + 2], showgrid=False, zeroline=False,
-                   title="Assumed pitch x (m)", color="#ededed"),
+                   showline=False, fixedrange=False,
+                   title="Assumed pitch x (m)", color="#9fb1c0", constrain="domain"),
         yaxis=dict(range=[width + 2, -2], scaleanchor="x", scaleratio=1,
-                   showgrid=False, zeroline=False, title="Assumed pitch y (m)", color="#ededed"),
+                   showgrid=False, zeroline=False, title="Assumed pitch y (m)",
+                   color="#9fb1c0", constrain="domain"),
     )
     return fig
 
@@ -217,16 +233,19 @@ def make_pitch_figure(rows, *, length, width, segment_id, mode,
         # smoothed raster: density interpolation could imply uncalibrated areas.
         _add_points(fig, rows, opacity=0.24)
     else:
+        used_roles = set()
         for segment in continuous_trajectories(rows):
             points = segment["rows"]
             if len(points) < 2:
                 continue
             role = segment["role"]
+            used_roles.add(role)
             fig.add_trace(go.Scattergl(
                 x=points["pitch_x_m"], y=points["pitch_y_m"],
                 mode="lines+markers", marker=dict(size=5),
                 line=dict(color=ROLE_COLORS.get(role, ROLE_COLORS["unknown"]), width=2),
                 name=f"Track {segment['track_id']} · {role.replace('_', ' ')}",
+                showlegend=False,  # Role-only legend below; track IDs remain in hover.
                 customdata=list(zip(points["track_id"].astype(str), points["frame"].astype(int))),
                 hovertemplate="Track %{customdata[0]} · frame %{customdata[1]}<extra></extra>",
             ))
@@ -234,6 +253,17 @@ def make_pitch_figure(rows, *, length, width, segment_id, mode,
         singles = [segment["rows"] for segment in continuous_trajectories(rows)
                    if len(segment["rows"]) == 1]
         if singles:
-            _add_points(fig, pd.concat(singles, ignore_index=True), opacity=0.65,
+            isolated = pd.concat(singles, ignore_index=True)
+            used_roles.update(isolated["predicted_role"].dropna().astype(str).unique())
+            # No fabricated positions: these are the original singleton samples.
+            _add_points(fig, isolated, opacity=0.65,
                         label_suffix=" · isolated sample")
+        # Compact legend: one key per provisional role, not one per fragment.
+        # Empty legend traces never introduce coordinates or synthesized evidence.
+        for role in sorted(used_roles):
+            fig.add_trace(go.Scatter(
+                x=[], y=[], mode="markers", showlegend=True,
+                marker=dict(size=10, color=ROLE_COLORS.get(role, ROLE_COLORS["unknown"])),
+                name=role.replace("_", " "), hoverinfo="skip",
+            ))
     return fig

@@ -1,0 +1,9 @@
+# Football Match Intelligence · Night Match theme
+# The app stays local and read-only; this file affects presentation only.
+[theme]
+base = "dark"
+primaryColor = "#62DCC0"
+backgroundColor = "#080F1B"
+secondaryBackgroundColor = "#132338"
+textColor = "#E8EFF9"
+font = "sans serif"
