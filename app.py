@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 
 import dashboard_data as data
 import frame_explorer as explorer
+import pitch_explorer as pitch_view
 
 
 st.set_page_config(
@@ -179,6 +180,7 @@ with st.sidebar:
             "Overview",
             "Video analysis",
             "Frame explorer",
+            "Interactive pitch explorer",
             "Player tracking",
             "Team classification",
             "Movement and heatmaps",
@@ -427,6 +429,135 @@ elif page == "Frame explorer":
                 ) if col in people_on_frame.columns
             ]
             st.dataframe(people_on_frame[visible_columns], hide_index=True, width="stretch")
+    show_not_validated()
+
+elif page == "Interactive pitch explorer":
+    st.subheader("Interactive pitch-coordinate explorer")
+    st.caption(f"Tracking run `{run_id}` · track IDs and team roles are provisional.")
+    if mapping is None:
+        st.warning("No uniquely compatible pitch mapping is selected. Resolve any run/compensation warnings first.")
+    elif mapping.empty:
+        st.info("No mapped observations exist in this run.")
+    else:
+        try:
+            length, width = pitch_view.safe_pitch_geometry(dataset.get("mapping_summary"))
+        except (TypeError, ValueError) as exc:
+            st.error(f"Invalid pitch geometry: {exc}")
+            st.stop()
+        st.warning(
+            f"Assumed, unverified pitch dimensions: {length:g} × {width:g} m. "
+            "Only individually valid mapped positions are shown; this is not whole-pitch tracking."
+        )
+        valid = data.valid_pitch_rows(mapping)
+        segments = sorted(valid["camera_segment_id"].dropna().astype(str).unique().tolist())
+        if not segments:
+            st.info("No valid pitch-mapped player observations are available.")
+        else:
+            segment = st.selectbox(
+                "Camera segment (isolated reference)", segments, key=f"pitch_segment_{run_id}"
+            )
+            try:
+                all_rows = pitch_view.valid_run_positions(
+                    mapping, run_id=run_id, segment_id=segment, length=length, width=width,
+                )
+            except ValueError as exc:
+                st.error(f"Run/segment mismatch: {exc}")
+                st.stop()
+            available_roles = sorted(all_rows["predicted_role"].unique().tolist())
+            roles = st.multiselect(
+                "Provisional teams / roles", available_roles, default=available_roles,
+                format_func=lambda role: TEAM_LABELS.get(role, role),
+                key=f"pitch_roles_{run_id}_{segment}",
+            )
+            available_tracks = sorted(
+                all_rows.loc[all_rows["predicted_role"].isin(roles), "track_id"].unique(),
+                key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value)),
+            )
+            selected_tracks = st.multiselect(
+                "Track ID filter (empty = all selected roles)", available_tracks,
+                key=f"pitch_tracks_{run_id}_{segment}",
+            )
+            frame_span = data._frame_span(tracking)
+            first = frame_span[0] if frame_span else int(all_rows["frame"].min())
+            last = frame_span[1] - 1 if frame_span else int(all_rows["frame"].max())
+            labels = {"Frame positions": "frame", "Trajectories": "trajectories",
+                      "Observation density": "samples"}
+            mode_name = st.radio(
+                "Visualization", list(labels), horizontal=True, key=f"pitch_mode_{run_id}"
+            )
+            mode = labels[mode_name]
+            frame_number = None
+            if mode == "frame":
+                frame_number = st.slider(
+                    "Source frame", min_value=first, max_value=last,
+                    value=int(all_rows["frame"].min()), key=f"pitch_frame_{run_id}",
+                )
+                start_frame = end_frame = frame_number
+            elif first == last:
+                start_frame = end_frame = first
+                st.caption(f"Only source frame {first} is available.")
+            else:
+                start_frame, end_frame = st.slider(
+                    "Source frame interval (inclusive)", min_value=first, max_value=last,
+                    value=(first, last), key=f"pitch_range_{run_id}",
+                )
+            try:
+                rows = pitch_view.valid_run_positions(
+                    mapping, run_id=run_id, segment_id=segment, length=length, width=width,
+                    roles=roles, track_ids=selected_tracks if selected_tracks else None,
+                    start_frame=start_frame, end_frame=end_frame,
+                )
+            except ValueError as exc:
+                st.error(f"Cannot plot these observations: {exc}")
+                st.stop()
+            # Only the loader's explicitly matched calibration can provide a hull.
+            # Never create one by taking the convex hull of mapped player positions.
+            hull = pitch_view.supported_hull(
+                dataset.get("calibration"), camera_segment_id=segment,
+                length=length, width=width,
+            )
+            if hull is None:
+                st.info(
+                    "No verified calibration hull is linked to this run. No coverage region "
+                    "is drawn or inferred from player positions."
+                )
+            else:
+                st.caption("Yellow shading: original calibration hull, without extrapolation.")
+            metric_columns([
+                ("Valid plotted samples", f"{len(rows):,}", "Only explicitly valid person rows."),
+                ("Track IDs", f"{rows['track_id'].nunique():,}", "Provisional IDs within the selected run."),
+                ("Segment", segment, "Other camera reference segments are excluded."),
+            ])
+            try:
+                fig = pitch_view.make_pitch_figure(
+                    rows, length=length, width=width, segment_id=segment,
+                    mode=mode, frame_number=frame_number, hull=hull,
+                )
+            except ModuleNotFoundError as exc:
+                if exc.name != "plotly":
+                    raise
+                st.error("Plotly is required. Run: python -m pip install plotly")
+            else:
+                st.plotly_chart(fig, width="stretch", key=f"pitch_plot_{run_id}_{segment}")
+                if rows.empty:
+                    st.info("No mapped observations match these filters and frames.")
+                elif mode == "trajectories":
+                    st.caption(
+                        "Lines join consecutive mapped frames only. Missing frames split paths; "
+                        "no positions are interpolated, and camera segments are never joined."
+                    )
+                elif mode == "samples":
+                    st.caption(
+                        "Transparent sample markers show observed concentration without smoothing, "
+                        "occupancy inference, or claiming coverage between mapped positions."
+                    )
+                if not rows.empty:
+                    columns = [col for col in (
+                        "frame", "track_id", "predicted_role", "camera_segment_id",
+                        "pitch_x_m", "pitch_y_m", "pitch_mapping_valid",
+                    ) if col in rows.columns]
+                    with st.expander("Inspect plotted observations"):
+                        st.dataframe(rows[columns], hide_index=True, width="stretch")
     show_not_validated()
 
 elif page == "Player tracking":
