@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import dashboard_data as data
+import frame_explorer as explorer
 
 
 st.set_page_config(
@@ -83,6 +84,14 @@ def load_dataset(output_root, selected_tracking_dir, file_fingerprint):
 def cached_read_csv(path, mtime_ns):
     del mtime_ns
     return pd.read_csv(path)
+
+
+@st.cache_data(show_spinner=False, max_entries=24)
+def cached_source_frame(video_path, frame_number, source_mtime_ns, source_size):
+    # The source video's metadata participates in the cache key. Cache only a
+    # bounded number of decoded frames; never write anything to data/output.
+    del source_mtime_ns, source_size
+    return explorer.read_source_frame(video_path, frame_number)
 
 
 def metric_columns(items):
@@ -169,6 +178,7 @@ with st.sidebar:
         [
             "Overview",
             "Video analysis",
+            "Frame explorer",
             "Player tracking",
             "Team classification",
             "Movement and heatmaps",
@@ -333,6 +343,90 @@ elif page == "Video analysis":
             "Path": data.display_path(video_path, ROOT) if video_path else "Not available",
         })
     st.dataframe(pd.DataFrame(present), hide_index=True, width="stretch")
+    show_not_validated()
+
+elif page == "Frame explorer":
+    st.subheader("Frame-by-frame player explorer")
+    st.caption(
+        f"Tracking run `{run_id}` · decoded frames come from the original source video. "
+        "Annotations show provisional tracker IDs and jersey-color role candidates, "
+        "not confirmed individual players. No YOLO processing is performed."
+    )
+    frame_span = data._frame_span(tracking)
+    if frame_span is None or frame_span[1] <= frame_span[0]:
+        st.error("The selected tracking summary has no valid source-frame range.")
+    else:
+        start_frame, end_exclusive = frame_span
+        frame_number = st.slider(
+            "Source frame (zero-based)",
+            min_value=start_frame,
+            max_value=end_exclusive - 1,
+            value=start_frame,
+            step=1,
+            key=f"frame_explorer_{run_id}",
+        )
+        all_roles = sorted(
+            confirmed.get("predicted_role", pd.Series(dtype="str"))
+            .fillna("unknown").astype(str).unique().tolist()
+        )
+        roles = st.multiselect(
+            "Show provisional roles", options=all_roles, default=all_roles,
+            key=f"frame_roles_{run_id}",
+            format_func=lambda role: TEAM_LABELS.get(role, role),
+        )
+        people_on_frame = data.frame_explorer_rows(
+            confirmed, run_id, frame_number, roles=roles
+        )
+        all_track_ids = sorted(people_on_frame["track_id"].astype(str).unique().tolist()) if not people_on_frame.empty else []
+        chosen_track = st.selectbox(
+            "Show track ID (current frame only)",
+            options=["All visible tracks"] + all_track_ids,
+            key=f"frame_track_{run_id}",
+        )
+        if chosen_track != "All visible tracks":
+            people_on_frame = data.frame_explorer_rows(
+                confirmed, run_id, frame_number, roles=roles, track_id=chosen_track
+            )
+        show_boxes = st.checkbox("Bounding boxes (when available)", value=True)
+        show_feet = st.checkbox("Foot-point markers", value=True)
+        fps = data._finite_positive(tracking.get("video_fps", tracking.get("source_video_fps")))
+        timestamp = f"{frame_number / fps:.2f} seconds" if fps else "timestamp unavailable"
+        st.caption(
+            f"Frame {frame_number} · source timestamp {timestamp} · "
+            f"{len(people_on_frame)} confirmed person observation(s) after filters."
+        )
+        video_path = Path(dataset["video_path"])
+        if not video_path.is_file():
+            st.error(f"The source video is missing: {data.display_path(video_path, ROOT)}")
+        else:
+            try:
+                source_stat = video_path.stat()
+                image = cached_source_frame(
+                    str(video_path), frame_number,
+                    source_stat.st_mtime_ns, source_stat.st_size,
+                )
+                annotated = explorer.draw_frame_annotations(
+                    image, people_on_frame, boxes=show_boxes, foot_points=show_feet
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                st.error(f"Unable to read the selected source frame: {exc}")
+            else:
+                st.image(annotated, caption=f"Original source frame {frame_number}", width="stretch")
+        st.caption(
+            "If bounding-box columns are absent from this tracking CSV, only foot points "
+            "are drawn. No missing positions, identities, or camera-compensated coordinates "
+            "are invented."
+        )
+        if people_on_frame.empty:
+            st.info("No confirmed person observations match this frame and the selected filters.")
+        else:
+            visible_columns = [
+                col for col in (
+                    "track_id", "predicted_role", "confidence", "foot_x", "foot_y",
+                    "x1", "y1", "x2", "y2", "timestamp",
+                ) if col in people_on_frame.columns
+            ]
+            st.dataframe(people_on_frame[visible_columns], hide_index=True, width="stretch")
     show_not_validated()
 
 elif page == "Player tracking":

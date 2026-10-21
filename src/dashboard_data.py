@@ -599,6 +599,42 @@ def track_run_summary(tracks):
     }
 
 
+def frame_explorer_rows(tracks, run_id, frame_number, roles=None, track_id=None):
+    """Read-only, run-scoped confirmed *person* observations for one source frame.
+
+    Tracker IDs are provisional; never mix identically numbered IDs from runs.
+    The original video is indexed by its zero-based source frame number.
+    """
+    if tracks is None or tracks.empty:
+        return pd.DataFrame() if tracks is None else tracks.iloc[0:0].copy()
+    required = {"run_id", "frame", "track_id", "class_id"}
+    missing = required - set(tracks.columns)
+    if missing:
+        raise DataValidationError(
+            f"Frame explorer requires columns: {', '.join(sorted(missing))}."
+        )
+    if not run_id:
+        raise DataValidationError("Frame explorer requires a selected tracking run UUID.")
+    if _unique_run_ids(tracks, "Frame explorer tracks") != {str(run_id)}:
+        raise DataValidationError("Frame explorer data does not match the selected tracking run UUID.")
+    try:
+        requested = int(frame_number)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise DataValidationError("Invalid source frame number.") from exc
+    if requested < 0:
+        raise DataValidationError("Source frame number must be nonnegative.")
+    frame_values = pd.to_numeric(tracks["frame"], errors="coerce")
+    class_values = pd.to_numeric(tracks["class_id"], errors="coerce")
+    selected = tracks.loc[(frame_values == requested) & (class_values == 0)].copy()
+    if roles is not None:
+        accepted = set(map(str, roles))
+        labels = selected.get("predicted_role", pd.Series("unknown", index=selected.index))
+        selected = selected.loc[labels.fillna("unknown").astype(str).isin(accepted)]
+    if track_id is not None:
+        selected = selected.loc[selected["track_id"].astype(str) == str(track_id)]
+    return selected.sort_values("track_id", kind="stable").reset_index(drop=True)
+
+
 def player_track_analytics(tracks, track_id):
     if tracks is None or tracks.empty:
         return {"observations": pd.DataFrame(), "summary": None}
