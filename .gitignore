@@ -1,0 +1,91 @@
+
+# ============================================
+# Football Match Intelligence - .gitignore
+# ============================================
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Python build and packaging files
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# AI/ML model weights and checkpoints
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+*.h5
+
+# Input datasets and footage
+data/input/
+
+# Generated pipeline results
+data/output/
+
+# Other large media files
+*.avi
+*.mov
+*.mkv
+*.mp4
+*.webm
+
+# Temporary files and logs
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+~$*
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+service-account*.json
+
+# Streamlit local configuration and secrets
+.streamlit/secrets.toml
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.code-workspace
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Local caches
+.cache/
+.cache-*/
